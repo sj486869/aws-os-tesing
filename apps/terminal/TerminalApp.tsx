@@ -6,10 +6,12 @@ import * as db from '@/lib/services/database'
 import type { AppComponentProps } from '@/core/os/appRegistry'
 import type { TerminalSession } from '@/types/database'
 
-type Line = { type: 'in' | 'out'; text: string }
+type Line = { type: 'in' | 'out' | 'error'; text: string }
 
 export function TerminalApp({}: AppComponentProps) {
   const { user } = useAuth()
+
+  // State
   const [session, setSession] = useState<TerminalSession | null>(null)
   const [lines, setLines] = useState<Line[]>([
     { type: 'out', text: 'webOS Terminal v1.0 — type "help" for commands' },
@@ -17,22 +19,31 @@ export function TerminalApp({}: AppComponentProps) {
   const [input, setInput] = useState('')
   const [cwd, setCwd] = useState('/home')
   const [loading, setLoading] = useState(true)
+
+  // Refs
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
 
-  // Initialize terminal session
+  const prompt = `user@webos:${cwd}$`
+
+  /* ===============================
+     Init Session
+  =============================== */
   useEffect(() => {
     if (!user) return
 
     const initSession = async () => {
       try {
         setLoading(true)
+
+        // FIX: Removed 'updated_at' (handled by db helper)
         const newSession = await db.createTerminalSession({
           user_id: user.id,
           title: `Terminal Session - ${new Date().toLocaleTimeString()}`,
           output: 'webOS Terminal v1.0 — type "help" for commands\n',
           working_directory: '/home',
         })
+
         setSession(newSession)
       } catch (error) {
         console.error('[Terminal] Failed to create session:', error)
@@ -44,22 +55,24 @@ export function TerminalApp({}: AppComponentProps) {
     initSession()
   }, [user])
 
-  // Auto-scroll to bottom
+  /* ===============================
+     Auto Scroll & Focus
+  =============================== */
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' })
   }, [lines])
 
-  // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus()
-  }, [])
+  }, [loading])
 
-  const prompt = `user@webos:${cwd}$`
-
-  const println = (text: string) => {
-    setLines((prev) => [...prev, { type: 'out', text }])
+  const println = (text: string, type: 'out' | 'error' = 'out') => {
+    setLines((prev) => [...prev, { type, text }])
   }
 
+  /* ===============================
+     Run Command
+  =============================== */
   const run = async (cmdline: string) => {
     const trimmed = cmdline.trim()
     if (!trimmed) return
@@ -83,9 +96,8 @@ export function TerminalApp({}: AppComponentProps) {
               '  date            Print current date',
               '  echo <text>     Print text',
               '  clear           Clear terminal',
-              '  history         Show command history',
               '  neofetch        System information',
-            ].join('\n'),
+            ].join('\n')
           )
           break
 
@@ -96,21 +108,12 @@ export function TerminalApp({}: AppComponentProps) {
         case 'cd':
           if (!arg) {
             setCwd('/home')
-            println('Changed to home directory')
           } else if (arg === '..') {
-            setCwd((prev) => {
-              const parts = prev.split('/')
-              parts.pop()
-              return parts.join('/') || '/'
-            })
-          } else if (arg === '/') {
-            setCwd('/')
+            setCwd((prev) => prev.split('/').slice(0, -1).join('/') || '/')
           } else {
-            setCwd((prev) => {
-              const newPath = arg.startsWith('/') ? arg : `${prev}/${arg}`
-              return newPath.replace(/\/+/g, '/')
-            })
-            println(`Changed to ${arg}`)
+            setCwd((prev) =>
+              (arg.startsWith('/') ? arg : `${prev}/${arg}`).replace(/\/+/g, '/')
+            )
           }
           break
 
@@ -127,7 +130,7 @@ export function TerminalApp({}: AppComponentProps) {
           break
 
         case 'echo':
-          println(arg || '')
+          println(arg)
           break
 
         case 'clear':
@@ -138,57 +141,56 @@ export function TerminalApp({}: AppComponentProps) {
           println(
             [
               '',
-              '     ___        ',
+              '     ___         ',
               '    /   \\___    webOS Desktop Environment',
               '   / [*] /  \\   User: ' + (user?.email || 'guest'),
               '  /  ~  /    \\  Kernel: Next.js v16',
               ' /  ~~~      \\ Database: Supabase PostgreSQL',
               '/_____________\\',
               '',
-            ].join('\n'),
+            ].join('\n')
           )
           break
 
-        case 'exit':
-          println('Goodbye!')
-          break
-
         default:
-          println(`Command not found: ${cmd}. Type "help" for available commands.`)
+          println(`Command not found: ${cmd}`)
       }
 
-      // Update session output
+      /* Save output */
       if (session && user) {
-        try {
-          const newOutput = `${session.output}${prompt} ${trimmed}\n`
-          await db.updateTerminalSession(session.id, user.id, {
-            output: newOutput,
-            updated_at: new Date().toISOString(),
-          })
-        } catch (error) {
-          console.error('[Terminal] Failed to save session:', error)
-        }
+        // FIX: Removed 'user.id' arg and 'updated_at' property.
+        // updateTerminalSession only takes (id, updates)
+        await db.updateTerminalSession(session.id, {
+          output: `${session.output}${prompt} ${trimmed}\n`,
+        })
       }
     } catch (error) {
-      println(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      println(
+        `Error: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        'error'
+      )
     }
   }
 
   if (loading) {
-    return <div className="p-4 text-sm opacity-70">Loading terminal...</div>
+    return <div className="p-4 text-sm opacity-70">Loading terminal…</div>
   }
 
   return (
-    <div className="flex flex-col h-full bg-slate-950 text-slate-100 font-mono text-sm">
+    <div 
+      className="flex flex-col h-full bg-slate-950 text-slate-100 font-mono text-sm"
+      onClick={() => inputRef.current?.focus()}
+    >
       {/* Output */}
       <div className="flex-1 overflow-y-auto p-4 space-y-1">
         {lines.map((line, idx) => (
-          <div key={idx} className={line.type === 'in' ? 'text-blue-400' : 'text-slate-300'}>
-            {line.text.split('\n').map((text, lineIdx) => (
-              <div key={lineIdx} className={lineIdx > 0 ? 'pl-2' : ''}>
-                {text}
-              </div>
-            ))}
+          <div
+            key={idx}
+            className={`whitespace-pre-wrap break-all ${
+              line.type === 'in' ? 'text-blue-400' : line.type === 'error' ? 'text-red-400' : 'text-slate-300'
+            }`}
+          >
+            {line.text}
           </div>
         ))}
         <div ref={bottomRef} />
@@ -196,18 +198,13 @@ export function TerminalApp({}: AppComponentProps) {
 
       {/* Input */}
       <div className="border-t border-slate-700 p-4 flex gap-2">
-        <span className="text-green-400">{prompt}</span>
+        <span className="text-green-400 shrink-0">{prompt}</span>
         <input
           ref={inputRef}
-          type="text"
           value={input}
           onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              run(input)
-            }
-          }}
-          className="flex-1 bg-transparent outline-none text-slate-100"
+          onKeyDown={(e) => e.key === 'Enter' && run(input)}
+          className="flex-1 bg-transparent outline-none border-none p-0 focus:ring-0"
           autoFocus
         />
       </div>
