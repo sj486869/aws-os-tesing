@@ -6,10 +6,12 @@ import * as db from '@/lib/services/database'
 import type { AppComponentProps } from '@/core/os/appRegistry'
 import type { TerminalSession } from '@/types/database'
 
-type Line = { type: 'in' | 'out'; text: string }
+type Line = { type: 'in' | 'out' | 'error'; text: string }
 
 export function TerminalApp({}: AppComponentProps) {
   const { user } = useAuth()
+
+  // State
   const [session, setSession] = useState<TerminalSession | null>(null)
   const [lines, setLines] = useState<Line[]>([
     { type: 'out', text: 'webOS Terminal v1.0 — type "help" for commands' },
@@ -17,25 +19,39 @@ export function TerminalApp({}: AppComponentProps) {
   const [input, setInput] = useState('')
   const [cwd, setCwd] = useState('/home')
   const [loading, setLoading] = useState(true)
+  const [history, setHistory] = useState<string[]>([])
+  const [historyIndex, setHistoryIndex] = useState(-1)
+
+  // Refs
   const bottomRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const scrollContainerRef = useRef<HTMLDivElement | null>(null)
 
-  // Initialize terminal session
+  // Constants
+  const prompt = `user@webos:${cwd}$`
+
+  /* ===============================
+     1. Init / Load Session
+  =============================== */
   useEffect(() => {
     if (!user) return
 
     const initSession = async () => {
       try {
         setLoading(true)
+
+        // FIX 1: Removed 'updated_at' (handled by DB helper)
         const newSession = await db.createTerminalSession({
           user_id: user.id,
-          title: `Terminal Session - ${new Date().toLocaleTimeString()}`,
+          title: `Terminal - ${new Date().toLocaleTimeString()}`,
           output: 'webOS Terminal v1.0 — type "help" for commands\n',
           working_directory: '/home',
         })
+
         setSession(newSession)
       } catch (error) {
         console.error('[Terminal] Failed to create session:', error)
+        setLines(prev => [...prev, { type: 'error', text: 'Failed to connect to terminal server.' }])
       } finally {
         setLoading(false)
       }
@@ -44,28 +60,48 @@ export function TerminalApp({}: AppComponentProps) {
     initSession()
   }, [user])
 
-  // Auto-scroll to bottom
+  /* ===============================
+     2. Auto-Focus & Scroll
+  =============================== */
+  // Keep focus on input unless user is selecting text
+  const handleContainerClick = () => {
+    const selection = window.getSelection()
+    if (selection && selection.type === 'Range') return
+    inputRef.current?.focus()
+  }
+
+  // Scroll to bottom when lines change
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' })
+    if (scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight
+    }
   }, [lines])
 
-  // Focus input on mount
+  // Initial focus
   useEffect(() => {
-    inputRef.current?.focus()
-  }, [])
+    const timer = setTimeout(() => inputRef.current?.focus(), 100)
+    return () => clearTimeout(timer)
+  }, [loading])
 
-  const prompt = `user@webos:${cwd}$`
-
-  const println = (text: string) => {
-    setLines((prev) => [...prev, { type: 'out', text }])
+  /* ===============================
+     3. Command Logic
+  =============================== */
+  const println = (text: string, type: 'out' | 'error' = 'out') => {
+    setLines((prev) => [...prev, { type, text }])
   }
 
   const run = async (cmdline: string) => {
     const trimmed = cmdline.trim()
-    if (!trimmed) return
-
+    
+    // Add to UI
     setLines((prev) => [...prev, { type: 'in', text: `${prompt} ${trimmed}` }])
     setInput('')
+    setHistoryIndex(-1)
+    
+    if (!trimmed) return
+
+    // Add to local history
+    setHistory(prev => [trimmed, ...prev])
 
     const [cmd, ...rest] = trimmed.split(/\s+/)
     const arg = rest.join(' ')
@@ -83,34 +119,24 @@ export function TerminalApp({}: AppComponentProps) {
               '  date            Print current date',
               '  echo <text>     Print text',
               '  clear           Clear terminal',
-              '  history         Show command history',
               '  neofetch        System information',
-            ].join('\n'),
+            ].join('\n')
           )
           break
 
         case 'ls':
-          println('Documents/  Downloads/  Desktop/  .bashrc')
+          println('Documents/  Downloads/  Desktop/  .bashrc  readme.md')
           break
 
         case 'cd':
-          if (!arg) {
+          if (!arg || arg === '~') {
             setCwd('/home')
-            println('Changed to home directory')
           } else if (arg === '..') {
-            setCwd((prev) => {
-              const parts = prev.split('/')
-              parts.pop()
-              return parts.join('/') || '/'
-            })
-          } else if (arg === '/') {
-            setCwd('/')
+            setCwd((prev) => prev.split('/').slice(0, -1).join('/') || '/')
           } else {
-            setCwd((prev) => {
-              const newPath = arg.startsWith('/') ? arg : `${prev}/${arg}`
-              return newPath.replace(/\/+/g, '/')
-            })
-            println(`Changed to ${arg}`)
+            // Simple visual path mocking
+            const newPath = arg.startsWith('/') ? arg : `${cwd}/${arg}`.replace('//', '/')
+            setCwd(newPath)
           }
           break
 
@@ -127,7 +153,7 @@ export function TerminalApp({}: AppComponentProps) {
           break
 
         case 'echo':
-          println(arg || '')
+          println(arg)
           break
 
         case 'clear':
@@ -137,79 +163,115 @@ export function TerminalApp({}: AppComponentProps) {
         case 'neofetch':
           println(
             [
+              '       /\\        OS: webOS 1.0',
+              '      /  \\       Kernel: Next.js Turbo',
+              '     /    \\      Uptime: ' + performance.now().toFixed(0) + 'ms',
+              '    /      \\     Shell: webOS-sh',
+              '   /________\\    User: ' + (user?.email?.split('@')[0] || 'guest'),
               '',
-              '     ___        ',
-              '    /   \\___    webOS Desktop Environment',
-              '   / [*] /  \\   User: ' + (user?.email || 'guest'),
-              '  /  ~  /    \\  Kernel: Next.js v16',
-              ' /  ~~~      \\ Database: Supabase PostgreSQL',
-              '/_____________\\',
-              '',
-            ].join('\n'),
+            ].join('\n')
           )
           break
 
-        case 'exit':
-          println('Goodbye!')
-          break
-
         default:
-          println(`Command not found: ${cmd}. Type "help" for available commands.`)
+          println(`webos: command not found: ${cmd}`, 'error')
       }
 
-      // Update session output
-      if (session && user) {
-        try {
-          const newOutput = `${session.output}${prompt} ${trimmed}\n`
-          await db.updateTerminalSession(session.id, user.id, {
-            output: newOutput,
-            updated_at: new Date().toISOString(),
-          })
-        } catch (error) {
-          console.error('[Terminal] Failed to save session:', error)
-        }
+      /* Save output to DB */
+      if (session) {
+        // FIX 2: Removed 'user.id' arg and 'updated_at' (handled by helper)
+        await db.updateTerminalSession(session.id, {
+          output: `${session.output}${prompt} ${trimmed}\n`,
+        })
       }
     } catch (error) {
-      println(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`)
+      println(`Error: ${error instanceof Error ? error.message : 'Unknown error'}`, 'error')
+    }
+  }
+
+  /* ===============================
+     4. Input Handling
+  =============================== */
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      run(input)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      if (historyIndex < history.length - 1) {
+        const newIndex = historyIndex + 1
+        setHistoryIndex(newIndex)
+        setInput(history[newIndex])
+      }
+    } else if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      if (historyIndex > 0) {
+        const newIndex = historyIndex - 1
+        setHistoryIndex(newIndex)
+        setInput(history[newIndex])
+      } else {
+        setHistoryIndex(-1)
+        setInput('')
+      }
     }
   }
 
   if (loading) {
-    return <div className="p-4 text-sm opacity-70">Loading terminal...</div>
+    return (
+      <div className="flex h-full w-full items-center justify-center bg-[#0d1117] text-slate-400 font-mono text-sm">
+        <span className="animate-pulse">Initializing TTY...</span>
+      </div>
+    )
   }
 
   return (
-    <div className="flex flex-col h-full bg-slate-950 text-slate-100 font-mono text-sm">
-      {/* Output */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-1">
+    <div 
+      className="flex flex-col h-full w-full bg-[#0d1117] text-[#c9d1d9] font-mono text-[13px] leading-5"
+      onClick={handleContainerClick}
+    >
+      {/* Scrollable Area */}
+      <div 
+        ref={scrollContainerRef}
+        className="flex-1 overflow-y-auto p-4 custom-scrollbar"
+      >
         {lines.map((line, idx) => (
-          <div key={idx} className={line.type === 'in' ? 'text-blue-400' : 'text-slate-300'}>
-            {line.text.split('\n').map((text, lineIdx) => (
-              <div key={lineIdx} className={lineIdx > 0 ? 'pl-2' : ''}>
-                {text}
-              </div>
-            ))}
+          <div
+            key={idx}
+            className={`${
+              line.type === 'in' 
+                ? 'text-[#8b949e] mt-2' // Dim command history
+                : line.type === 'error'
+                ? 'text-red-400' 
+                : 'text-[#c9d1d9]'
+            } whitespace-pre-wrap break-all`}
+          >
+            {line.text}
           </div>
         ))}
-        <div ref={bottomRef} />
-      </div>
 
-      {/* Input */}
-      <div className="border-t border-slate-700 p-4 flex gap-2">
-        <span className="text-green-400">{prompt}</span>
-        <input
-          ref={inputRef}
-          type="text"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') {
-              run(input)
-            }
-          }}
-          className="flex-1 bg-transparent outline-none text-slate-100"
-          autoFocus
-        />
+        {/* Active Input Line */}
+        <div className="flex mt-2">
+          <span className="text-[#58a6ff] mr-2 shrink-0 select-none">{prompt}</span>
+          <div className="relative flex-1 group">
+            <input
+              ref={inputRef}
+              type="text"
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="absolute inset-0 w-full opacity-0 cursor-text"
+              autoComplete="off"
+              autoCorrect="off"
+              spellCheck="false"
+            />
+            {/* Custom Cursor Renderer */}
+            <span className="whitespace-pre-wrap break-all">
+              {input}
+              <span className="inline-block w-[8px] h-[15px] bg-[#c9d1d9] align-middle animate-pulse ml-[1px]" />
+            </span>
+          </div>
+        </div>
+        
+        <div ref={bottomRef} />
       </div>
     </div>
   )
